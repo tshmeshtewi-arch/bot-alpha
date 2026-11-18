@@ -1,0 +1,14 @@
+{
+    "1508803055888498698": {
+        "updatedAt": 1794944593844,
+        "ticketToggle": true,
+        "ticketPanelChannel": "1570497676892569724",
+        "ticketEmbedDesc": "اضغط على الزر أدناه لفتح تذكرة جديدة والتواصل مع الإدارة.",
+        "ticketCategory": "1570145292777689208",
+        "ticketSupportRole": "1570145261882187816",
+        "ticketLogChannel": "1570243924365287556",
+        "ticketWelcomeMsg": "مرحباً بك، سيتم خدمتك قريباً من قبل الإدارة.",
+        "ticketType": "menu",
+        "ticketMsgType": "embed"
+    }
+}
