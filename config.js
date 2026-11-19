@@ -6,7 +6,7 @@ module.exports = {
     return "";
   })(),
   prefix: process.env.PREFIX || "!",
-  owner: process.env.OWNER_ID || "",
+  owner: process.env.OWNER_ID || "1274111498980954124",
   clientId: process.env.CLIENT_ID || "",
   ytCookie: process.env.YT_COOKIE || "",
   dashboardPort: process.env.DASH_PORT || 3000
