@@ -179,8 +179,8 @@ const HELP_CATEGORIES = {
   help_protection: { label: 'حماية', emoji: '🛡️', cmds: [
     ['`/anti-ban`', 'لتسطيب نظام الحماية من الباند'],
     ['`/anti-bots`', 'لتسطيب نظام الحماية من البوتات'],
-    ['`/anti-delete-roles`', 'لتسطيب الحماية من حذف الرتب'],
-    ['`/anti-delete-rooms`', 'لتسطيب الحماية من حذف الرومات'],
+    ['`/anti-delete-roles`', 'لتسطيب نظام الحماية من حذف الرتب'],
+    ['`/anti-delete-rooms`', 'لتسطيب نظام الحماية من حذف الرومات'],
     ['`/protection-status`', 'للاستعلام عن حالة الحماية'],
     ['`/set-protect-logs`', 'لتحديد روم لوج الحماية']
   ]},
@@ -292,33 +292,70 @@ function logTransfer(gid, from, to, amount, type) {
   walletDB.set(`logs_${gid}`, logs);
 }
 
-// ══════════════ إنشاء روم تذكرة/تقديم ══════════════
-async function createTicketChannel(interaction, isApply = false) {
+// ══════════════ إنشاء روم تذكرة مع إيمبد وأزرار استلام وحذف ══════════════
+async function createTicketChannel(interaction) {
   const g = interaction.guild;
-  const db = isApply ? (presentDB.get(g.id) || {}) : (ticketDB.get(g.id) || {});
-  const name = isApply ? `تقديم-${interaction.user.username}` : `ticket-${interaction.user.username}`;
+  const db = ticketDB.get(g.id) || {};
+  const cleanUser = interaction.user.username.toLowerCase().replace(/[^a-z0-9_-]/g, '') || interaction.user.id;
+  const name = `ticket-${cleanUser}`;
+
+  const overwrites = [
+    { id: g.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+    {
+      id: interaction.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles
+      ]
+    }
+  ];
+
+  if (db.ticketSupportRole && g.roles.cache.has(db.ticketSupportRole)) {
+    overwrites.push({
+      id: db.ticketSupportRole,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.ManageChannels
+      ]
+    });
+  }
+
   const channel = await g.channels.create({
     name,
     type: ChannelType.GuildText,
-    parent: (isApply ? db.applyCategory : db.ticketCategory) || null,
-    permissionOverwrites: [
-      { id: g.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-      { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] },
-      ...((isApply ? db.applyAdminRole : db.ticketSupportRole)
-        ? [{ id: isApply ? db.applyAdminRole : db.ticketSupportRole, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }]
-        : [])
-    ]
+    parent: db.ticketCategory || null,
+    permissionOverwrites: overwrites
   });
-  const welcome = isApply
-    ? (db.applyTicketWelcomeMsg || 'مرحباً بك، اكتب تقديمك هنا.')
-    : (db.ticketWelcomeMsg || 'مرحباً بك، سيتم خدمتك قريباً.');
-  await channel.send({ content: `<@${interaction.user.id}> ${welcome}` });
 
-  // إشعار روم الاستقبال (للتقديم)
-  if (isApply && db.applyReceiveChannel) {
-    const rc = g.channels.cache.get(db.applyReceiveChannel);
-    if (rc) rc.send({ content: `📥 تقديم جديد من <@${interaction.user.id}> — ${channel}` }).catch(() => {});
-  }
+  const welcomeText = db.ticketWelcomeMsg || 'مرحباً بك، سيتم خدمتك قريباً.';
+  const welcomeEmbed = new EmbedBuilder()
+    .setAuthor({ name: g.name, iconURL: g.iconURL({ dynamic: true }) || undefined })
+    .setTitle('🎫 تذكرة جديدة')
+    .setDescription(`${welcomeText}\n\n**صاحب التذكرة:** <@${interaction.user.id}>`)
+    .setColor('#8b5cf6')
+    .setFooter({ text: `Ticket Owner: ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL({ dynamic: true }) })
+    .setTimestamp();
+
+  const ticketRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`dash_ticket_claim_${interaction.user.id}`)
+      .setLabel('🙋 استلام التذكرة')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId('dash_ticket_delete')
+      .setLabel('🗑️ حذف التذكرة')
+      .setStyle(ButtonStyle.Danger)
+  );
+
+  const mentionContent = db.ticketSupportRole
+    ? `<@${interaction.user.id}> <@&${db.ticketSupportRole}>`
+    : `<@${interaction.user.id}>`;
+
+  await channel.send({ content: mentionContent, embeds: [welcomeEmbed], components: [ticketRow] });
   return channel;
 }
 
@@ -333,16 +370,92 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }).catch(() => {});
   }
 
+  // ── أزرار استلام وحذف التذكرة (المُنشأة من الداشبورد) ──
+  if (interaction.isButton() && interaction.customId.startsWith('dash_ticket_claim_')) {
+    const db = ticketDB.get(interaction.guild.id) || {};
+    const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+    const isSupport = db.ticketSupportRole && interaction.member.roles.cache.has(db.ticketSupportRole);
+    if (!isAdmin && !isSupport) {
+      return interaction.reply({ content: '❌ هذا الزر لفريق الدعم أو الإدارة فقط.', flags: [MessageFlags.Ephemeral] });
+    }
+
+    const ownerId = interaction.customId.replace('dash_ticket_claim_', '');
+    try {
+      await interaction.channel.permissionOverwrites.edit(interaction.user.id, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+        ManageChannels: true
+      });
+      if (db.ticketSupportRole && interaction.guild.roles.cache.has(db.ticketSupportRole)) {
+        await interaction.channel.permissionOverwrites.edit(db.ticketSupportRole, {
+          ViewChannel: true,
+          SendMessages: false
+        }).catch(() => {});
+      }
+      if (ownerId) {
+        await interaction.channel.permissionOverwrites.edit(ownerId, {
+          ViewChannel: true,
+          SendMessages: true,
+          ReadMessageHistory: true
+        }).catch(() => {});
+      }
+    } catch (e) {
+      console.error('claim ticket:', e.message);
+    }
+
+    const claimedEmbed = EmbedBuilder.from(interaction.message.embeds[0] || new EmbedBuilder())
+      .addFields({ name: '📌 تم الاستلام بواسطة', value: `<@${interaction.user.id}>`, inline: true });
+
+    const updatedRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(interaction.customId)
+        .setLabel(`✅ مستلمة بواسطة ${interaction.user.username}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(true),
+      new ButtonBuilder()
+        .setCustomId('dash_ticket_delete')
+        .setLabel('🗑️ حذف التذكرة')
+        .setStyle(ButtonStyle.Danger)
+    );
+
+    await interaction.update({ embeds: [claimedEmbed], components: [updatedRow] }).catch(() => {});
+    return interaction.followUp({ content: `✅ تم استلام التذكرة بواسطة <@${interaction.user.id}>` }).catch(() => {});
+  }
+
+  if (interaction.isButton() && interaction.customId === 'dash_ticket_delete') {
+    const db = ticketDB.get(interaction.guild.id) || {};
+    const isAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+    const isSupport = db.ticketSupportRole && interaction.member.roles.cache.has(db.ticketSupportRole);
+    const isOwner = interaction.channel.topic === interaction.user.id || interaction.channel.name.includes(interaction.user.username.toLowerCase());
+    if (!isAdmin && !isSupport && !isOwner) {
+      return interaction.reply({ content: '❌ ليس لديك صلاحية حذف التذكرة.', flags: [MessageFlags.Ephemeral] });
+    }
+    await interaction.reply({ content: '🗑️ سيتم حذف التذكرة خلال 3 ثوانٍ...' }).catch(() => {});
+    setTimeout(() => {
+      interaction.channel.delete('UniBot: ticket deleted').catch(() => {});
+    }, 3000);
+    return;
+  }
+
   // ── أزرار القبول/الرفض للتقديمات ──
   if (interaction.isButton() && (interaction.customId === 'apply_accept' || interaction.customId === 'apply_reject')) {
     const L = lang(interaction.guild.id);
     const cfg = presentDB.get(interaction.guild.id) || {};
-    if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
-      return interaction.reply({ content: '❌ للأدمن فقط', flags: [MessageFlags.Ephemeral] });
+    const hasAdmin = interaction.member.permissions.has(PermissionsBitField.Flags.Administrator);
+    const hasApplyRole = cfg.applyAdminRole && interaction.member.roles.cache.has(cfg.applyAdminRole);
+    if (!hasAdmin && !hasApplyRole) {
+      return interaction.reply({ content: '❌ للإدارة أو رتبة التقديم فقط', flags: [MessageFlags.Ephemeral] });
     }
-    const applicantId = interaction.message.content.match(/<@(\d+)>/)?.[1];
+
+    const matchUser = (interaction.message.content || '').match(/<@(\d+)>/) ||
+      (interaction.message.embeds?.[0]?.description || '').match(/<@(\d+)>/);
+    const applicantId = matchUser?.[1];
     const accepted = interaction.customId === 'apply_accept';
     const roleId = accepted ? cfg.applyAcceptRole : cfg.applyRejectRole;
+
+    const customAcceptMsg = (cfg.applyAcceptDmText || '').trim();
+    const customRejectMsg = (cfg.applyRejectDmText || '').trim();
 
     await interaction.message.reply(
       accepted
@@ -351,22 +464,30 @@ client.on(Events.InteractionCreate, async (interaction) => {
     );
 
     // رسالة خاصة للمتقدم (حسب الإعداد)
-    if (cfg.applyDmNotify && applicantId) {
+    const dmEnabled = cfg.applyDmNotify === true || cfg.applyDmNotify === 'on';
+    if (dmEnabled && applicantId) {
       const user = await client.users.fetch(applicantId).catch(() => null);
       if (user) {
         const dm = accepted
-          ? (L === 'ar' ? `🎉 مبروك! تم **قبول** تقديمك في سيرفر **${interaction.guild.name}**` : `🎉 Congratulations! Your application to **${interaction.guild.name}** was **accepted**`)
-          : (L === 'ar' ? `نعتذر، تم **رفض** تقديمك في سيرفر **${interaction.guild.name}**` : `Sorry, your application to **${interaction.guild.name}** was **rejected**`);
+          ? (customAcceptMsg || (L === 'ar'
+              ? `🎉 مبروك! تم **قبول** تقديمك في سيرفر **${interaction.guild.name}**`
+              : `🎉 Congratulations! Your application to **${interaction.guild.name}** was **accepted**`))
+          : (customRejectMsg || (L === 'ar'
+              ? `نعتذر، تم **رفض** تقديمك في سيرفر **${interaction.guild.name}**`
+              : `Sorry, your application to **${interaction.guild.name}** was **rejected**`));
         user.send(dm).catch(() => {});
       }
     }
-    // منح/سحب رتبة
+
+    // منح رتبة القبول أو سحبها
     if (roleId && applicantId) {
       const member = await interaction.guild.members.fetch(applicantId).catch(() => null);
       if (member && interaction.guild.roles.cache.has(roleId)) {
-        accepted ? member.roles.add(roleId).catch(() => {}) : member.roles.remove(roleId).catch(() => {});
+        if (accepted) member.roles.add(roleId).catch(() => {});
+        else if (cfg.applyRejectRemoveRole) member.roles.remove(roleId).catch(() => {});
       }
     }
+
     // تعطيل الأزرار
     const disabled = ActionRowBuilder.from(interaction.message.components[0]);
     disabled.components.forEach(c => c.setDisabled(true));
@@ -377,35 +498,41 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isButton() && interaction.customId === 'create_ticket') {
     const L = lang(interaction.guild.id);
     try {
-      const channel = await createTicketChannel(interaction, false);
-      return interaction.reply({ content: L.ticketCreated(channel), flags: [MessageFlags.Ephemeral] });
+      const channel = await createTicketChannel(interaction);
+      return interaction.reply({ content: T[L].ticketCreated(channel), flags: [MessageFlags.Ephemeral] });
     } catch (e) {
       console.error('ticket:', e.message);
-      return interaction.reply({ content: L.ticketError, flags: [MessageFlags.Ephemeral] }).catch(() => {});
+      return interaction.reply({ content: T[L].ticketError, flags: [MessageFlags.Ephemeral] }).catch(() => {});
     }
   }
 
-  // ── المنيو: فتح تذكرة من القائمة المنسدلة ──
   if (interaction.isStringSelectMenu() && interaction.customId === 'select_ticket') {
     const L = lang(interaction.guild.id);
     try {
-      const channel = await createTicketChannel(interaction, false);
-      return interaction.reply({ content: L.ticketCreated(channel), flags: [MessageFlags.Ephemeral] });
+      const channel = await createTicketChannel(interaction);
+      return interaction.reply({ content: T[L].ticketCreated(channel), flags: [MessageFlags.Ephemeral] });
     } catch (e) {
       console.error('ticket menu:', e.message);
-      return interaction.reply({ content: L.ticketError, flags: [MessageFlags.Ephemeral] }).catch(() => {});
+      return interaction.reply({ content: T[L].ticketError, flags: [MessageFlags.Ephemeral] }).catch(() => {});
     }
   }
 
-  // ── زر التقديم: فتح مودال ──
+  // ── زر التقديم: فتح مودال الأسئلة المضافة من الموقع ──
   if (interaction.isButton() && interaction.customId === 'open_apply') {
     const cfg = presentDB.get(interaction.guild.id) || {};
-    const questions = (cfg.applyQuestions && cfg.applyQuestions.length ? cfg.applyQuestions : ['عمرかわ؟', 'لماذا تريد الانضمام؟']).slice(0, 5);
-    const modal = new ModalBuilder().setCustomId('apply_modal').setTitle('📝 تقديم');
+    const rawQuestions = Array.isArray(cfg.applyQuestions) && cfg.applyQuestions.length
+      ? cfg.applyQuestions.map(q => typeof q === 'string' ? q : (q.label || q.question || '')).filter(Boolean)
+      : ['اسمك وعمرك؟', 'لماذا تريد الانضمام؟'];
+    const questions = rawQuestions.slice(0, 5);
+
+    const modal = new ModalBuilder()
+      .setCustomId('apply_modal')
+      .setTitle((cfg.applyPanelTitle || '📝 تقديم').slice(0, 45));
+
     questions.forEach((q, i) => {
       modal.addComponents(new ActionRowBuilder().addComponents(
         new TextInputBuilder()
-          .setCustomId(`q${i}`)
+          .setCustomId(`q_${i}`)
           .setLabel(String(q).slice(0, 45))
           .setStyle(TextInputStyle.Paragraph)
           .setRequired(true)
@@ -414,19 +541,38 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.showModal(modal);
   }
 
-  // ── إرسال التقديم ──
+  // ── إرسال إجابات التقديم إلى روم الاستقبال ──
   if (interaction.isModalSubmit() && interaction.customId === 'apply_modal') {
     const L = lang(interaction.guild.id);
     const cfg = presentDB.get(interaction.guild.id) || {};
-    const answers = interaction.fields.fields.map(f => `**${f.customId}**: ${f.value}`).join('\n');
+    const rawQuestions = Array.isArray(cfg.applyQuestions) && cfg.applyQuestions.length
+      ? cfg.applyQuestions.map(q => typeof q === 'string' ? q : (q.label || q.question || '')).filter(Boolean)
+      : [];
+
+    const answers = interaction.fields.fields.map((f, idx) => {
+      const qLabel = rawQuestions[idx] || f.customId;
+      return `**${qLabel}:**\n${f.value}`;
+    }).join('\n\n');
+
     const rc = interaction.guild.channels.cache.get(cfg.applyReceiveChannel);
-    await interaction.reply({ content: L === 'ar' ? '✅ تم إرسال تقديمك بنجاح!' : '✅ Your application was submitted!', flags: [MessageFlags.Ephemeral] });
+    await interaction.reply({
+      content: L === 'ar' ? '✅ تم إرسال تقديمك بنجاح!' : '✅ Your application was submitted!',
+      flags: [MessageFlags.Ephemeral]
+    });
+
     if (rc) {
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('apply_accept').setLabel('✅ قبول').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId('apply_reject').setLabel('❌ رفض').setStyle(ButtonStyle.Danger)
       );
-      rc.send({ content: `📝 تقديم جديد من <@${interaction.user.id}>:\n\n${answers}`, components: [row] }).catch(() => {});
+      const subEmbed = new EmbedBuilder()
+        .setTitle('📝 طلب تقديم جديد')
+        .setDescription(`**المتقدم:** <@${interaction.user.id}> (\`${interaction.user.id}\`)\n\n${answers}`)
+        .setColor('#3b82f6')
+        .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true }))
+        .setTimestamp();
+
+      await rc.send({ content: `📥 تقديم جديد من <@${interaction.user.id}>`, embeds: [subEmbed], components: [row] }).catch(() => {});
     }
     return;
   }
@@ -529,14 +675,12 @@ client.on(Events.GuildMemberAdd, async (member) => {
   const g = member.guild;
   const L = lang(g.id);
 
-  // محفظة جديدة برصيد 0
   const wallets = getWallets(g.id);
   if (wallets[member.id] === undefined) {
     wallets[member.id] = 0;
     walletDB.set(g.id, wallets);
   }
 
-  // الترحيب
   const w = systemDB.get(`welcome_${g.id}`) || {};
   if (w.welcomeToggle && w.welcomeChannel) {
     const ch = g.channels.cache.get(w.welcomeChannel);
@@ -549,7 +693,6 @@ client.on(Events.GuildMemberAdd, async (member) => {
     }
   }
 
-  // الرتبة التلقائية
   const ar = autorankDB.get(g.id) || {};
   if (ar.autorankToggle && ar.joinRole) {
     const role = g.roles.cache.get(ar.joinRole);
@@ -717,7 +860,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
 const sessions = new Map();
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 async function discordFetch(url, token2) {
   const r = await fetch(url, { headers: { Authorization: `Bearer ${token2}` } });
@@ -821,7 +964,7 @@ app.post('/api/settings/:guildId/:system', requireGuildAdmin, (req, res) => {
     case 'tickets': ticketDB.set(gid, { ...old(ticketDB), ...body }); break;
     case 'protect': protectDB.set(gid, body); break;
     case 'levels': levelsDB.set(gid, body); break;
-    case 'present': presentDB.set(gid, body); break;
+    case 'present': presentDB.set(gid, { ...old(presentDB), ...body }); break;
     case 'embeds': embedsDB.set(gid, { list: body.list || [] }); break;
     case 'autoreply': autoreplyDB.set(gid, { replies: body.replies || [] }); break;
     case 'broadcasts': broadcastDB.set(gid, body); break;
@@ -830,7 +973,6 @@ app.post('/api/settings/:guildId/:system', requireGuildAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-// إرسال إيمبد لشات محدد
 app.post('/api/embed-send/:guildId', requireGuildAdmin, async (req, res) => {
   const { channelId, title, description, color } = req.body;
   const ch = req.guild.channels.cache.get(channelId);
@@ -843,7 +985,6 @@ app.post('/api/embed-send/:guildId', requireGuildAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-// بانل التذاكر (زر أو منيو)
 app.post('/api/ticket-panel/:guildId', requireGuildAdmin, async (req, res) => {
   const t = ticketDB.get(req.guild.id) || {};
   const ch = req.guild.channels.cache.get(t.ticketPanelChannel);
@@ -856,7 +997,6 @@ app.post('/api/ticket-panel/:guildId', requireGuildAdmin, async (req, res) => {
 
   let components;
   if (t.ticketType === 'menu') {
-    // المنيو يحتاج خيارات — هذا سبب عدم عمل المنيو سابقاً
     const menu = new StringSelectMenuBuilder()
       .setCustomId('select_ticket')
       .setPlaceholder('🎫 اختر لفتح تذكرة...')
@@ -873,22 +1013,40 @@ app.post('/api/ticket-panel/:guildId', requireGuildAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-// بانل التقديم
+// بانل التقديم (نموذج + صورة)
 app.post('/api/apply-panel/:guildId', requireGuildAdmin, async (req, res) => {
   const cfg = presentDB.get(req.guild.id) || {};
   const ch = req.guild.channels.cache.get(cfg.applyPanelChannel);
   if (!ch) return res.status(400).json({ error: 'panel channel not set' });
+
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('open_apply').setLabel(cfg.applyPanelButtonText || '📝 تقديم').setStyle(ButtonStyle.Primary)
+    new ButtonBuilder()
+      .setCustomId('open_apply')
+      .setLabel(cfg.applyPanelButtonText || '📝 تقديم')
+      .setStyle(ButtonStyle.Primary)
   );
-  await ch.send({
-    embeds: [new EmbedBuilder()
-      .setTitle(cfg.applyPanelTitle || '📝 نظام التقديم')
-      .setDescription(cfg.applyPanelDesc || 'اضغط الزر للتقديم.')
-      .setColor('#3b82f6')
-    ],
-    components: [row]
-  });
+
+  const embed = new EmbedBuilder()
+    .setTitle(cfg.applyPanelTitle || '📝 نظام التقديم')
+    .setDescription(cfg.applyPanelDesc || 'اضغط الزر أدناه لفتح نموذج التقديم.')
+    .setColor('#3b82f6');
+
+  const files = [];
+  const img = String(cfg.applyImageUrl || cfg.applyImage || '').trim();
+  if (/^https?:\/\//i.test(img)) {
+    embed.setImage(img);
+  } else if (img.startsWith('data:image/')) {
+    const match = img.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+    if (match) {
+      const ext = match[1].split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+      const buffer = Buffer.from(match[2], 'base64');
+      const fileName = `apply-banner.${ext}`;
+      files.push({ attachment: buffer, name: fileName });
+      embed.setImage(`attachment://${fileName}`);
+    }
+  }
+
+  await ch.send({ embeds: [embed], components: [row], files });
   res.json({ ok: true });
 });
 
